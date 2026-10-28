@@ -4,7 +4,7 @@ import type { OnMount } from "@monaco-editor/react";
 import * as Y from "yjs";
 import { MonacoBinding } from "y-monaco";
 import "./index.css";
-
+import * as awarenessProtocol from "y-protocols/awareness.js";
 const WS_URL = "ws://localhost:1234";
 const ROOM_NAME = "my-code-room";
 
@@ -14,6 +14,7 @@ enum MessageType {
   AUTH_REFRESH = 0,
   INITIAL_DOC_STATE = 1,
   YJS_UPDATE = 2,
+  AWARENESS_UPDATE = 3,
 }
 
 export default function App() {
@@ -94,6 +95,17 @@ export default function App() {
     const ydoc = new Y.Doc();
     const ytext = ydoc.getText("monaco");
 
+    const awareness = new awarenessProtocol.Awareness(ydoc);
+
+    const hue = Math.floor(Math.random() * 360);
+    const color = `hsl(${hue}, 80%, 50%)`;
+    const colorLight = `hsla(${hue}, 80%, 50%, 0.3)`;
+
+    awareness.setLocalStateField("user", {
+      name: "User_" + Math.floor(Math.random() * 100),
+      color,
+      colorLight,
+    });
     const ws = new WebSocket(`${WS_URL}/${encodeURIComponent(ROOM_NAME)}`);
 
     ws.binaryType = "arraybuffer";
@@ -103,11 +115,86 @@ export default function App() {
     if (!model) {
       ws.close();
       ydoc.destroy();
+      awareness.destroy();
       return;
     }
 
     // Connect the Yjs text to the Monaco editor.
-    const binding = new MonacoBinding(ytext, model, new Set([editor]));
+    const binding = new MonacoBinding(
+      ytext,
+      model,
+      new Set([editor]),
+      awareness,
+    );
+
+    const styleEl = document.createElement("style");
+    document.head.appendChild(styleEl);
+
+    const renderRemoteStyles = () => {
+      let css = "";
+
+      awareness.getStates().forEach((state, clientID) => {
+        if (clientID === awareness.clientID) return; // skip myself
+        const user = state.user;
+        if (!user) return;
+
+        const name = String(user.name).replace(/["\\]/g, "");
+
+        css += `
+      .yRemoteSelection-${clientID} {
+        background-color: ${user.colorLight};
+      }
+
+      .yRemoteSelectionHead-${clientID} {
+        position: absolute;
+        border-left: 2px solid ${user.color};
+        height: 100%;
+        box-sizing: border-box;
+        pointer-events: auto; /* allow hover on the cursor */
+      }
+
+      /* invisible wider hit area so hovering is easy */
+      .yRemoteSelectionHead-${clientID}::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: -5px;
+        width: 12px;
+        height: 100%;
+        pointer-events: auto;
+      }
+
+      /* name label: hidden by default */
+      .yRemoteSelectionHead-${clientID}::after {
+        content: "${name}";
+        position: absolute;
+        top: -1.4em;
+        left: -2px;
+        background: ${user.color};
+        color: #fff;
+        font-size: 11px;
+        line-height: 1.2;
+        padding: 1px 5px;
+        border-radius: 3px;
+        white-space: nowrap;
+        pointer-events: none;
+        z-index: 10;
+        opacity: 0;
+        transition: opacity 0.15s ease;
+      }
+
+      /* show label on hover */
+      .yRemoteSelectionHead-${clientID}:hover::after {
+        opacity: 1;
+      }
+    `;
+      });
+
+      styleEl.textContent = css;
+    };
+
+    awareness.on("change", renderRemoteStyles);
+    renderRemoteStyles();
 
     // Send local Yjs changes to the backend.
     const handleYjsUpdate = (update: Uint8Array, origin: unknown) => {
@@ -129,6 +216,48 @@ export default function App() {
 
     ydoc.on("update", handleYjsUpdate);
 
+    // 3. Sync local Awareness state changes to the WebSocket
+    const handleAwarenessUpdate = (
+      {
+        added,
+        updated,
+        removed,
+      }: {
+        added: number[];
+        updated: number[];
+        removed: number[];
+      },
+      origin: unknown,
+    ) => {
+      // Don't send updates received from another client back to the server.
+      if (origin === REMOTE_ORIGIN) return;
+
+      if (ws.readyState !== WebSocket.OPEN) return;
+
+      // Include every client whose awareness state changed.
+      const changedClients = [...added, ...updated, ...removed];
+
+      if (changedClients.length === 0) return;
+
+      const update = awarenessProtocol.encodeAwarenessUpdate(
+        awareness,
+        changedClients,
+      );
+
+      ws.send(
+        encodePacket(
+          MessageType.AWARENESS_UPDATE,
+          {
+            userId: "my-user-id",
+            roomId: ROOM_NAME,
+            accessToken: "my-access-token",
+          },
+          update,
+        ),
+      );
+    };
+
+    awareness.on("update", handleAwarenessUpdate);
     ws.onopen = () => {
       const authMessage = encodePacket(
         MessageType.AUTH_REFRESH,
@@ -138,6 +267,20 @@ export default function App() {
           accessToken: "my-access-token",
         },
         null,
+      );
+
+      ws.send(
+        encodePacket(
+          MessageType.AWARENESS_UPDATE,
+          {
+            userId: "my-user-id",
+            roomId: ROOM_NAME,
+            accessToken: "my-access-token",
+          },
+          awarenessProtocol.encodeAwarenessUpdate(awareness, [
+            awareness.clientID,
+          ]),
+        ),
       );
 
       ws.send(authMessage);
@@ -156,6 +299,15 @@ export default function App() {
         if (messageType === MessageType.YJS_UPDATE) {
           Y.applyUpdate(ydoc, yjsBuffer, REMOTE_ORIGIN);
         }
+        if (messageType === MessageType.AWARENESS_UPDATE) {
+          console.log("Applying awareness update from server:", yjsBuffer);
+
+          awarenessProtocol.applyAwarenessUpdate(
+            awareness,
+            yjsBuffer,
+            REMOTE_ORIGIN,
+          );
+        }
       } catch (error) {
         console.error("Failed to process server message:", error);
       }
@@ -171,9 +323,14 @@ export default function App() {
     };
 
     cleanupRef.current = () => {
+      awareness.off("change", renderRemoteStyles);
+      awareness.off("update", handleAwarenessUpdate);
       ydoc.off("update", handleYjsUpdate);
+      awareness.setLocalState(null); // tells others you left (sent before ws closes)
       binding.destroy();
+      styleEl.remove();
       ws.close();
+      awareness.destroy();
       ydoc.destroy();
     };
   }, []);

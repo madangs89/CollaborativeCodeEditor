@@ -1,10 +1,11 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import { createServer } from "https";
+import { createServer } from "http";
 import WebSocket, { WebSocketServer } from "ws";
-import { listen } from "bun";
 import * as Y from "yjs";
+
+import * as awarenessProtocol from "y-protocols/awareness";
 
 dotenv.config();
 const app = express();
@@ -18,6 +19,7 @@ const wss = new WebSocketServer({ server });
 
 type Room = {
   doc: Y.Doc;
+  awareness: awarenessProtocol.Awareness;
   clients: Set<WebSocket>;
 };
 
@@ -30,6 +32,7 @@ enum MessageType {
   AUTH_REFRESH = 0,
   INITIAL_DOC_STATE = 1,
   YJS_UPDATE = 2,
+  AWARENESS_UPDATE = 3,
 }
 
 // Message types:
@@ -41,8 +44,9 @@ const getRoom = (roomName: string) => {
   let room = rooms.get(roomName);
   if (!room) {
     const doc = new Y.Doc();
-    const clients = new Set<WebSocket>();
-    room = { doc, clients };
+    const awareness = new awarenessProtocol.Awareness(doc);
+    awareness.setLocalState(null); // server isn't a participant
+    room = { doc, awareness, clients: new Set() };
     rooms.set(roomName, room);
   }
   return room;
@@ -137,19 +141,28 @@ wss.on("connection", (ws: WebSocket, req: any) => {
     const { userId, roomId, accessToken } = metadata;
     if (messageType === MessageType.AUTH_REFRESH) {
       const room = getRoom(roomId);
-      // token validation logic here (omitted for brevity) pending later we do now assume all tokens are valid
       room.clients.add(ws);
 
-      const initialState = Y.encodeStateAsUpdate(room.doc);
-      for (const client of room.clients) {
-        if (client !== ws && client.readyState === WebSocket.OPEN) {
-          const initialStateMessage = encodePacket(
-            MessageType.INITIAL_DOC_STATE,
+      // doc state -> the new client
+      ws.send(
+        encodePacket(
+          MessageType.INITIAL_DOC_STATE,
+          {},
+          Y.encodeStateAsUpdate(room.doc),
+        ),
+      );
+
+      // awareness state -> the new client
+      const states = Array.from(room.awareness.getStates().keys());
+      console.log("Sending awareness states to new client:", states);
+      if (states.length > 0) {
+        ws.send(
+          encodePacket(
+            MessageType.AWARENESS_UPDATE,
             {},
-            initialState,
-          );
-          client.send(initialStateMessage);
-        }
+            awarenessProtocol.encodeAwarenessUpdate(room.awareness, states),
+          ),
+        );
       }
     }
 
@@ -165,6 +178,24 @@ wss.on("connection", (ws: WebSocket, req: any) => {
             yjsBuffer,
           );
           client.send(updateMessage);
+        }
+      }
+    }
+
+    if (messageType === MessageType.AWARENESS_UPDATE) {
+      const room = getRoom(roomId);
+
+      awarenessProtocol.applyAwarenessUpdate(room.awareness, yjsBuffer, ws);
+      console.log("Applying awareness update for room:", roomId);
+
+      for (const client of room.clients) {
+        if (client !== ws && client.readyState === WebSocket.OPEN) {
+          const awarenessMessage = encodePacket(
+            MessageType.AWARENESS_UPDATE,
+            {},
+            yjsBuffer,
+          );
+          client.send(awarenessMessage);
         }
       }
     }
