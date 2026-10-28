@@ -5,7 +5,6 @@ import { createServer } from "https";
 import WebSocket, { WebSocketServer } from "ws";
 import { listen } from "bun";
 import * as Y from "yjs";
-import type { IncomingMessage } from "http";
 
 dotenv.config();
 const app = express();
