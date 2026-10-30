@@ -4,6 +4,7 @@ import { LoginSchema, RegisterSchema } from "./auth.zod";
 import { prisma } from "../../lib/prisma";
 import bcrypt from "bcrypt";
 import {
+  clearCookie,
   generateAccessToken,
   hashToken,
   setCookie,
@@ -172,6 +173,167 @@ export const loginController = async (
         refreshToken,
       },
       data: user,
+    });
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ message: "Internal server error", success: false });
+  }
+};
+
+export const refreshTokenController = async (
+  req: Request,
+  res: Response<AuthResponse>,
+) => {
+  try {
+    const refreshToken = req.cookies["refreshToken"];
+    if (!refreshToken) {
+      clearCookie(res, "refreshToken");
+      return res.status(401).json({
+        message: "Refresh token not found",
+        success: false,
+      });
+    }
+    const hashedToken = hashToken(refreshToken);
+
+    const isSessionValid = await prisma.refreshToken.findUnique({
+      where: { tokenHash: hashedToken },
+    });
+
+    if (!isSessionValid) {
+      clearCookie(res, "refreshToken");
+
+      return res.status(401).json({
+        message: "Invalid refresh token",
+        success: false,
+      });
+    }
+    // checking is token revoke
+    if (isSessionValid.revokedAt) {
+      // need to handle grace window
+      await prisma.refreshToken.updateMany({
+        where: { familyId: isSessionValid.familyId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      clearCookie(res, "refreshToken");
+
+      return res.status(401).json({
+        message: "Refresh token revoked",
+        success: false,
+      });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: isSessionValid.userId },
+      select: userSelect,
+    });
+
+    if (!user) {
+      clearCookie(res, "refreshToken");
+
+      return res.status(401).json({
+        message: "User not found",
+        success: false,
+      });
+    }
+
+    const newRefreshToken = generateAccessToken();
+
+    const data = await prisma.$transaction(async (tx) => {
+      const isClaimed = await tx.refreshToken.updateMany({
+        where: { id: isSessionValid.id, revokedAt: null },
+        data: {
+          revokedAt: new Date(),
+        },
+      });
+
+      if (isClaimed.count !== 1) return null;
+
+      const result = await tx.refreshToken.create({
+        data: {
+          tokenHash: hashToken(newRefreshToken),
+          expiresAt: isSessionValid.expiresAt,
+          familyId: isSessionValid.familyId,
+          userId: user.id,
+          createdAt: new Date(),
+        },
+      });
+
+      return result;
+    });
+
+    if (!data) {
+      await prisma.refreshToken.updateMany({
+        where: { familyId: isSessionValid.familyId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+      clearCookie(res, "refreshToken");
+
+      return res.status(401).json({
+        message: "Refresh token revoked",
+        success: false,
+      });
+    }
+
+    const newAccessToken = signToken(
+      {
+        id: user.id,
+        email: user.email,
+      },
+      process.env.JWT_EXPIRATION as string,
+    );
+
+    setCookie(res, newRefreshToken, "refreshToken");
+    return res.status(200).json({
+      message: "Refresh token refreshed successfully",
+      success: true,
+      tokens: {
+        accessToken: newAccessToken,
+        refreshToken: newRefreshToken,
+      },
+      data: user,
+    });
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ message: "Internal server error", success: false });
+  }
+};
+
+export const logoutController = async (
+  req: Request,
+  res: Response<AuthResponse>,
+) => {
+  try {
+    const refreshToken = req.cookies["refreshToken"];
+    if (!refreshToken) {
+      clearCookie(res, "refreshToken");
+      return res.status(401).json({
+        message: "Refresh token not found",
+        success: false,
+      });
+    }
+    const hashedToken = hashToken(refreshToken);
+    const window = await prisma.refreshToken.findUnique({
+      where: { tokenHash: hashedToken },
+    });
+    if (!window) {
+      clearCookie(res, "refreshToken");
+      return res.status(401).json({
+        message: "Refresh token not found",
+        success: false,
+      });
+    }
+
+    await prisma.refreshToken.updateMany({
+      where: { familyId: window.familyId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+
+    clearCookie(res, "refreshToken");
+    return res.status(200).json({
+      message: "Logout successfully",
+      success: true,
     });
   } catch (error) {
     return res

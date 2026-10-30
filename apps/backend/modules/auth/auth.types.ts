@@ -18,6 +18,9 @@ interface AuthErrorResponse {
 interface AuthSuccessResponse {
   message: string;
   success: true;
+}
+
+interface AuthSuccessResponseWithMeta extends AuthSuccessResponse {
   tokens: {
     accessToken: string;
     refreshToken: string;
@@ -25,4 +28,5 @@ interface AuthSuccessResponse {
   data: safeUser;
 }
 
-export type AuthResponse = AuthErrorResponse | AuthSuccessResponse;
+export type AuthResponse =
+  AuthErrorResponse | AuthSuccessResponse | AuthSuccessResponseWithMeta;
