@@ -1,5 +1,5 @@
 import type { Request, Response } from "express";
-import type { AuthResponse, Login, Register } from "./auth.types";
+import type { AuthResponse, Login, Register, safeUser } from "./auth.types";
 import { LoginSchema, RegisterSchema } from "./auth.zod";
 import { prisma } from "../../lib/prisma";
 import bcrypt from "bcrypt";
@@ -90,7 +90,6 @@ export const registerController = async (
       success: true,
       tokens: {
         accessToken,
-        refreshToken,
       },
       data: user,
     });
@@ -170,9 +169,13 @@ export const loginController = async (
       success: true,
       tokens: {
         accessToken,
-        refreshToken,
       },
-      data: user,
+      data: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        profilePhoto: user.profilePhoto,
+      } as safeUser,
     });
   } catch (error) {
     return res
@@ -211,6 +214,19 @@ export const refreshTokenController = async (
     // checking is token revoke
     if (isSessionValid.revokedAt) {
       // need to handle grace window
+
+      const diff = Date.now() - isSessionValid.revokedAt.getTime();
+
+      // 10 seconds grace window
+      if (diff < 10 * 1000) {
+        return res.status(409).json({
+          message:
+            "Refresh in progress, please wait a few seconds and try again",
+          success: false,
+          code: "RETRY",
+        });
+      }
+
       await prisma.refreshToken.updateMany({
         where: { familyId: isSessionValid.familyId, revokedAt: null },
         data: { revokedAt: new Date() },
@@ -223,6 +239,14 @@ export const refreshTokenController = async (
       });
     }
 
+    if (isSessionValid.expiresAt <= new Date()) {
+      clearCookie(res, "refreshToken");
+
+      return res.status(401).json({
+        message: "Refresh token expired",
+        success: false,
+      });
+    }
     const user = await prisma.user.findUnique({
       where: { id: isSessionValid.userId },
       select: userSelect,
@@ -263,15 +287,10 @@ export const refreshTokenController = async (
     });
 
     if (!data) {
-      await prisma.refreshToken.updateMany({
-        where: { familyId: isSessionValid.familyId, revokedAt: null },
-        data: { revokedAt: new Date() },
-      });
-      clearCookie(res, "refreshToken");
-
-      return res.status(401).json({
-        message: "Refresh token revoked",
+      return res.status(409).json({
+        message: "Refresh in progress, please wait a few seconds and try again",
         success: false,
+        code: "RETRY",
       });
     }
 
@@ -289,7 +308,6 @@ export const refreshTokenController = async (
       success: true,
       tokens: {
         accessToken: newAccessToken,
-        refreshToken: newRefreshToken,
       },
       data: user,
     });

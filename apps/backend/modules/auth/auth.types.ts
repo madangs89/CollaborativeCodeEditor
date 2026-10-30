@@ -13,6 +13,7 @@ export type safeUser = Prisma.UserGetPayload<{
 interface AuthErrorResponse {
   message: string;
   success: false;
+  code?: string;
 }
 
 interface AuthSuccessResponse {
@@ -23,7 +24,6 @@ interface AuthSuccessResponse {
 interface AuthSuccessResponseWithMeta extends AuthSuccessResponse {
   tokens: {
     accessToken: string;
-    refreshToken: string;
   };
   data: safeUser;
 }
