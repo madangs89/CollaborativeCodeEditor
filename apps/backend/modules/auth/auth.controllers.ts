@@ -2,10 +2,11 @@ import type { Request, Response } from "express";
 import type { AuthResponse, Login, Register, safeUser } from "./auth.types";
 import { LoginSchema, RegisterSchema } from "./auth.zod";
 import { prisma } from "../../lib/prisma";
+import crypto from "node:crypto";
 import bcrypt from "bcrypt";
 import {
   clearCookie,
-  generateAccessToken,
+  generateRefreshToken,
   hashToken,
   setCookie,
   signToken,
@@ -55,7 +56,7 @@ export const registerController = async (
       process.env.JWT_EXPIRATION as string,
     );
 
-    const refreshToken = generateAccessToken();
+    const refreshToken = generateRefreshToken();
 
     const familyId = crypto.randomUUID();
 
@@ -144,7 +145,7 @@ export const loginController = async (
       },
       process.env.JWT_EXPIRATION as string,
     );
-    const refreshToken = generateAccessToken();
+    const refreshToken = generateRefreshToken();
     const familyId = crypto.randomUUID();
 
     await prisma.refreshToken.create({
@@ -261,7 +262,7 @@ export const refreshTokenController = async (
       });
     }
 
-    const newRefreshToken = generateAccessToken();
+    const newRefreshToken = generateRefreshToken();
 
     const data = await prisma.$transaction(async (tx) => {
       const isClaimed = await tx.refreshToken.updateMany({
@@ -326,9 +327,9 @@ export const logoutController = async (
     const refreshToken = req.cookies["refreshToken"];
     if (!refreshToken) {
       clearCookie(res, "refreshToken");
-      return res.status(401).json({
-        message: "Refresh token not found",
-        success: false,
+      return res.status(200).json({
+        message: "Logout successfully",
+        success: true,
       });
     }
     const hashedToken = hashToken(refreshToken);
@@ -337,9 +338,9 @@ export const logoutController = async (
     });
     if (!window) {
       clearCookie(res, "refreshToken");
-      return res.status(401).json({
-        message: "Refresh token not found",
-        success: false,
+      return res.status(200).json({
+        message: "Logout successfully",
+        success: true,
       });
     }
 
